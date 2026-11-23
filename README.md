@@ -1,3 +1,5 @@
+[![DOI](https://zenodo.org/badge/1467938610.svg)](https://doi.org/10.5281/zenodo.24451837)
+
 # What is this repository for?
 TM-Scan is an open-source Python library for estimating discontinuity intensity (P20, P21) and mean discontinuity trace length (μ) from traces mapped on 3D point clouds, and for using these results to parameterize and simulate conditioned Discrete Fracture Networks (DFN). Besides the window analyses, the library provides point-cloud quality checks (occlusions and roughness), orientation models and stereonets, spatial-dependence diagnostics with a spatial block bootstrap, and P32 maps and uncertainty plots.
 
