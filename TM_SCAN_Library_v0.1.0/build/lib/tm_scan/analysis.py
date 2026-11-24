@@ -52,9 +52,10 @@ def _rectangle_analyzer(window, sampling, options, verbose):
                       ref_dir=np.array([1., 0., 0.]), plane_tol=.03 * scale,
                       rect_buffer=.05 * scale, proj_band=.35 * scale,
                       inner_strip_2d=.5 * scale, min_neighbors=20,
-                      up=np.array([0., 0., 1.]), smooth_k=sampling.k_smooth, eps=1e-9)
+                      up=np.array([0., 0., 1.]), smooth_k=sampling.k_smooth, eps=1e-9,
+                      delta_mode="max")
     options = dict(options or {})
-    allowed = {"ref_dir", "plane_tol", "rect_buffer", "min_neighbors", "up", "eps"}
+    allowed = {"ref_dir", "plane_tol", "rect_buffer", "min_neighbors", "up", "eps", "delta_mode"}
     if set(options) - allowed:
         raise ValueError(f"Unknown or inactive rectangle options: {sorted(set(options) - allowed)}.")
     parameters.update(options)
@@ -88,11 +89,16 @@ def analyze(dataset, window, *, sampling=None, family_orientations=None,
     """Run one analysis in memory, without prompts, plots or file writes.
 
     roughness_filter=False (default) keeps every window. With True, windows
-    that are not planar at the window scale (rho = xi_R/R > tau, or projected
+    that are not planar at the window scale (iota = xi_R/R > tau, or projected
     coverage < min_cover) are rejected before the trace analysis; the full
     assessment, including rejected centres, is kept in `result.roughness`.
     roughness_options may set tau (0.08), min_cover (0.80) and radius
-    (default: sphere radius, or the equal-area radius of the rectangle).
+    (default: sphere radius, or min(size_u, size_v) of the rectangle, the
+    neighbourhood used to fit the rectangle plane).
+
+    rectangle_options may set delta_mode ('max' default, 'p95', 'p99'): the
+    slab half-thickness used to clip the traces. 'p95' leaves about 5 % of
+    the surface, and thus of the trace end points, outside the slab.
 
     Explicit centers bypass k_smooth and voxel sampling, but still undergo
     the window/boundary filters. Family orientations are required
@@ -180,6 +186,11 @@ def _analyze(dataset, window, *, sampling=None, family_orientations=None,
                        point_count=len(dataset.scan), source=dataset.source,
                        engine=engine, n_jobs=n_jobs,
                        sampling_fraction=len(accepted) / len(candidates) if len(candidates) else np.nan)
+    from .undefined import undefined_log
+    undefined = undefined_log(tables, window.kind, orientations)
+    diagnostics["undefined_values"] = len(undefined)
+    if verbose and len(undefined):
+        print(f"[info] {len(undefined)} undefined (NaN) estimates; causes in result.undefined")
     diagnostics["roughness_filter"] = bool(roughness_filter)
     if roughness is not None:
         diagnostics.update(roughness_tau=roughness.tau, roughness_min_cover=roughness.min_cover,
@@ -187,4 +198,4 @@ def _analyze(dataset, window, *, sampling=None, family_orientations=None,
                            rejected_by_roughness=before_roughness - int(roughness.admissible.sum()),
                            final_windows=len(accepted))
     return AnalysisResult(dataset.name, dataset.length_unit, window, sampling,
-                          tables, accepted, candidates, voxel_size, diagnostics, quads, roughness)
+                          tables, accepted, candidates, voxel_size, diagnostics, quads, roughness, undefined)

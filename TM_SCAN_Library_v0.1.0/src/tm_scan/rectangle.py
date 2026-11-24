@@ -29,6 +29,7 @@ class RectangleAnalyzer:
                  up,
                  smooth_k,
                  eps,
+                 delta_mode="max",
                  verbose=False):
         self.paths = paths
         self.size_u = float(size_u)
@@ -41,6 +42,9 @@ class RectangleAnalyzer:
         self.inner_strip_2d = float(inner_strip_2d)
         self.min_neighbors = int(min_neighbors)
         self.up = np.asarray(up, float) / (np.linalg.norm(up) + 1e-12)
+        if delta_mode not in ("p95", "p99", "max"):
+            raise ValueError("delta_mode must be 'p95', 'p99' or 'max'.")
+        self.delta_mode = delta_mode          # slab half-thickness used to clip the traces
         self.smooth_k = float(smooth_k)
         self.eps = float(eps)
         self.verbose = bool(verbose)
@@ -552,7 +556,7 @@ class RectangleAnalyzer:
             # Neighborhood-based thickness (delta) for clipping in the local d-direction
             idx = tree.query_ball_point(c, r=radius)
             neigh = scan_xyz[idx] if len(idx) > 0 else np.empty((0, 3), float)
-            delta_i = self._delta_for_window(c, n_win, neigh_points=neigh)
+            delta_i = self._delta_for_window(c, n_win, neigh_points=neigh, mode=self.delta_mode)
 
             # Per-window sets to ensure each trace is counted only once
             traces_with_length = set()

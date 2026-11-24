@@ -12,7 +12,7 @@ In any Jupyter environment (Jupyter Lab/Notebook, or VS Code with the Jupyter ex
 The first cell of `case_study.ipynb` installs the library and all its dependencies from the wheel included in the repository. After running it, restart the kernel. To install manually, run in the repository folder:
 
 ```text
-pip install ./TM_SCAN_Library_v0.1.0/dist/tm_scan-0.1.0-py3-none-any.whl
+pip install ./TM_SCAN_Library_v0.1.0/dist/tm_scan-0.1.1-py3-none-any.whl
 ```
 
 The following libraries are installed automatically: NumPy, Pandas, SciPy, Scikit-learn, Shapely, GeoPandas, Matplotlib, Joblib and Numba.

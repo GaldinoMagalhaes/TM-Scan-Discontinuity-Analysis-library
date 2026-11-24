@@ -223,7 +223,8 @@ def analyze_rectangles_fast(analyzer, geometry, traces, orientations, n_jobs):
             normal = -normal
         frames[wi] = np.array([center, u, v, normal, [hu, hv, 0.]])
         indices = tree.query_ball_point(center, min(analyzer.size_u, analyzer.size_v))
-        deltas[wi] = analyzer._delta_for_window(center, normal, neigh_points=xyz[indices])
+        deltas[wi] = analyzer._delta_for_window(center, normal, neigh_points=xyz[indices],
+                                                 mode=analyzer.delta_mode)
     tables = {}
     for family, traces_frame in traces.items():
         packed = pack_traces(analyzer, traces_frame)

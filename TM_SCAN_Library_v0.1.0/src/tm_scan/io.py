@@ -110,6 +110,10 @@ def export_result(result, directory):
     summary_path = root / "summary.csv"
     result.summary().to_csv(summary_path, index=False, na_rep="NaN")
     paths.append(summary_path)
+    if result.undefined is not None:
+        undefined_path = root / "undefined_values.csv"
+        result.undefined.to_csv(undefined_path, index=False, na_rep="NaN", encoding="utf-8")
+        paths.append(undefined_path)
     centers_path = root / "candidate_centers.csv"
     pd.DataFrame(result.candidate_centers, columns=["X", "Y", "Z"]).to_csv(centers_path, index=False)
     paths.append(centers_path)
@@ -118,12 +122,17 @@ def export_result(result, directory):
               f"voxel_size = {result.voxel_size}", f"diagnostics = {result.diagnostics}",
               "summary_std = sample SD across windows; not a confidence interval",
               "P21 = clipped 3D trace length / planar window area",
+              "undefined estimates are stored as NaN, never replaced; causes in undefined_values.csv",
               f"python = {platform.python_version()}"]
     for package in ("tm-scan", "numpy", "pandas", "scipy", "scikit-learn", "shapely", "geopandas", "matplotlib"):
         try:
             record.append(f"{package} = {version(package)}")
         except PackageNotFoundError:
             record.append(f"{package} = not installed as distribution")
+    if result.undefined is not None and len(result.undefined):
+        record.append("undefined values (family, quantity, cause, windows):")
+        record += [f"  {r.family}, {r.quantity}, {r.cause_code}, {r.windows}"
+                   for r in result.undefined_summary().itertuples()]
     record_path = root / "run.txt"
     record_path.write_text("\n".join(record) + "\n", encoding="utf-8")
     paths.append(record_path)
