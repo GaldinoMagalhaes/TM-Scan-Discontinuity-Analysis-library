@@ -1,10 +1,19 @@
-"""Window-scale roughness control, tied to the sampling windows.
+"""Window-scale roughness control, tied to the sampling windows (diagnostic only).
 
-Criterion (per window of radius R): rho = xi_R / R <= tau and projected
-coverage >= min_cover, with xi_R the SD of the point distances to the
-best-fit plane (sigma(D) of Lague et al. 2013, D = 2R). Scaling law
-xi_r = A r^H after Sadeghi & Aubertin (2025). By default windows are only
-FLAGGED; rejection happens only with analyze(..., roughness_filter=True).
+Detector 1 (cloud only), per window of radius R: iota = xi_R / R <= tau and
+projected coverage >= min_cover, with xi_R the SD of the point distances to
+the best-fit plane (sigma(D) of Lague et al. 2013, D = 2R). A rectangle reads
+iota at min(size_u, size_v), the neighbourhood used to fit its plane, so the
+smallest admissible size R_adm is both a sphere radius and a rectangle side.
+Scaling law xi_r = A r^H after Sadeghi & Aubertin (2025).
+
+Detector 2 (cloud + traces): predicted retention eta, the expected fraction
+of trace length a window keeps, from the distance s between each trace chord
+and the surface: sphere 1 - (s^2 + xi_R^2)/R^2; rectangle (side W = 2R)
+fraction of chord length with |s| <= delta (slab half-thickness).
+
+Nothing is corrected. Windows are only FLAGGED; rejection happens only with
+analyze(..., roughness_filter=True).
 """
 from dataclasses import dataclass, field
 import numpy as np
@@ -12,6 +21,7 @@ import pandas as pd
 from scipy.spatial import cKDTree
 
 DEFAULT_TAU, DEFAULT_MIN_COVER = 0.08, 0.80
+DEFAULT_SLAB_MODE = "max"          # same default as the rectangle (rectangle_options delta_mode)
 
 
 # ------------------------------------------------------------ point cloud ---
@@ -33,9 +43,16 @@ def fine_normals(points, k=16):
     return tree, np.linalg.eigh(np.einsum("nki,nkj->nij", Q, Q))[1][:, :, 0]
 
 
-def window_roughness(points, tree, centers, radius, spacing, min_points=20):
-    """Per spherical window: xi, rho = xi/R, delta (P95 |d| to the plane through
-    the centre) and cover (occupied fraction of the projected disc)."""
+def _slab(abs_d, mode=DEFAULT_SLAB_MODE):
+    """Slab half-thickness from |d|, as RectangleAnalyzer._delta_for_window."""
+    if mode == "max":
+        return float(abs_d.max())
+    return float(np.percentile(abs_d, 99.0 if mode == "p99" else 95.0))
+
+
+def window_roughness(points, tree, centers, radius, spacing, min_points=20, slab_mode=DEFAULT_SLAB_MODE):
+    """Per spherical window: xi, iota = xi/R, delta (slab half-thickness of |d| to the
+    plane through the centre, `slab_mode`) and cover (occupied fraction of the projected disc)."""
     out = np.full((len(centers), 4), np.nan)
     for i, index in enumerate(tree.query_ball_point(centers, radius)):
         if len(index) < min_points:
@@ -44,36 +61,50 @@ def window_roughness(points, tree, centers, radius, spacing, min_points=20):
         X = selected - selected.mean(0)
         w, V = np.linalg.eigh(X.T @ X / len(index))
         xi = np.sqrt(max(w[0], 0.0))
-        delta = np.percentile(np.abs((selected - centers[i]) @ V[:, 0]), 95)
+        delta = _slab(np.abs((selected - centers[i]) @ V[:, 0]), slab_mode)
         cells = np.unique(np.floor(X @ V[:, 1:] / (2 * spacing)), axis=0)
         out[i] = xi, xi / radius, delta, min(1.0, len(cells) * (2 * spacing) ** 2 / (np.pi * radius ** 2))
-    return pd.DataFrame(out, columns=["xi", "rho", "delta", "cover"])
+    return pd.DataFrame(out, columns=["xi", "iota", "delta", "cover"])
 
 
-def roughness_scan(points, centers, radii, spacing, per_radius=16):
+def roughness_scan(points, centers, radii, spacing, per_radius=16, slab_mode=DEFAULT_SLAB_MODE):
     """Multi-scale scan; at radius R the cloud is used at resolution max(spacing, R/16)."""
     out = {}
     for radius in radii:
         resolution = max(spacing, radius / per_radius)
         thinned = points if resolution <= spacing else voxel_thin(points, resolution)
-        out[float(radius)] = window_roughness(thinned, cKDTree(thinned), centers, radius, resolution)
+        out[float(radius)] = window_roughness(thinned, cKDTree(thinned), centers, radius, resolution,
+                                              slab_mode=slab_mode)
     return out
 
 
 def admissible_radius(scan, tau=DEFAULT_TAU, min_cover=DEFAULT_MIN_COVER):
-    """Smallest radius from which the window is planar and covered at every larger radius.
+    """Smallest radius R with iota <= tau at R and at every larger tested radius, and
+    coverage >= min_cover at R only (a larger radius leaving the cloud does not void it).
 
-    Returns (radius per centre, NaN if none; boolean table centre x radius)."""
+    Returns (R_adm per centre, NaN if none; boolean table centre x radius with
+    iota <= tau and cover >= min_cover at each radius; reason per centre:
+    'ok' | 'rough' | 'low_cover' | 'few_points')."""
     radii = np.asarray(sorted(scan))
-    ok = np.column_stack([(scan[R].rho <= tau) & (scan[R].cover >= min_cover) for R in radii])
-    tail = np.cumprod(ok[:, ::-1], axis=1)[:, ::-1].astype(bool)
-    return np.where(tail.any(1), radii[tail.argmax(1)], np.nan), ok
+    iota = np.column_stack([scan[R].iota.to_numpy(float) for R in radii])
+    cover = np.column_stack([scan[R].cover.to_numpy(float) for R in radii])
+    smooth = iota <= tau
+    covered = cover >= min_cover
+    ok = smooth & covered
+    tail = np.cumprod(smooth[:, ::-1], axis=1)[:, ::-1].astype(bool) & covered
+    r_adm = np.where(tail.any(1), radii[tail.argmax(1)], np.nan)
+    reason = np.where(tail.any(1), "ok",
+                      np.where(np.isnan(iota).all(1), "few_points",
+                               np.where(smooth.any(1) & ~covered.any(1), "low_cover", "rough")))
+    return r_adm, ok, reason
 
 
-def power_law(radii, xi):
-    """xi_r = A r^H; returns (A, H)."""
+def power_law(radii, xi, fit_range=None):
+    """xi_r = A r^H fitted on the radii inside fit_range = (lo, hi) (all if None); returns (A, H)."""
     radii, xi = np.asarray(radii, float), np.asarray(xi, float)
     valid = np.isfinite(xi) & (xi > 0)
+    if fit_range is not None:
+        valid &= (radii >= fit_range[0]) & (radii <= fit_range[1])
     if valid.sum() < 2:
         return np.nan, np.nan
     H, lnA = np.polyfit(np.log(radii[valid]), np.log(xi[valid]), 1)
@@ -85,7 +116,7 @@ def r_min(A, H, tau):
     return (A / tau) ** (1.0 / (1.0 - H)) if np.isfinite(A) and H < 1 else np.nan
 
 
-# ------------------------------------------------------- trace capture ---
+# ---------------------------------------------- predicted retention ---
 def _trace_endpoints(dataset, families=None):
     from ._traces import endpoints
     names = list(dataset.traces) if families is None else list(families)
@@ -107,58 +138,19 @@ def trace_samples(A, B, points, tree, normals, step):
     return dict(q=q, w=w, foot=foot, s=s, ftree=cKDTree(points[foot]))
 
 
-def _clip_len(a, d, lo, hi):
-    t0, t1 = np.zeros(len(a)), np.ones(len(a))
-    with np.errstate(divide="ignore", invalid="ignore"):
-        for j in range(a.shape[1]):
-            ta, tb = (lo[j] - a[:, j]) / d[:, j], (hi[j] - a[:, j]) / d[:, j]
-            parallel = np.abs(d[:, j]) < 1e-12
-            inside = (a[:, j] >= lo[j]) & (a[:, j] <= hi[j])
-            t0 = np.maximum(t0, np.where(parallel, np.where(inside, -np.inf, np.inf), np.minimum(ta, tb)))
-            t1 = np.minimum(t1, np.where(parallel, np.inf, np.maximum(ta, tb)))
-    return np.clip(t1 - t0, 0, None) * np.linalg.norm(d, axis=1)
+def predicted_retention(centers, samples, radius, xi, delta):
+    """Length-weighted predicted retention per window, from the chord samples whose foot
+    lies within `radius` of the centre: sphere 1 - (s^2 + xi^2)/R^2 (section of the sphere
+    at distance s); rectangle |s| <= delta (slab tolerance). NaN = no trace sample.
 
-
-def _sphere_chord(c, A, B, R):
-    d, m = B - A, A - c
-    a, b, cc = (d * d).sum(1), 2 * (m * d).sum(1), (m * m).sum(1) - R * R
-    disc = b * b - 4 * a * cc
-    s = np.sqrt(np.clip(disc, 0, None))
-    with np.errstate(divide="ignore", invalid="ignore"):
-        t0, t1 = np.clip((-b - s) / (2 * a), 0, 1), np.clip((-b + s) / (2 * a), 0, 1)
-    return np.nansum(np.where(disc > 0, t1 - t0, 0) * np.sqrt(a))
-
-
-def _rect_frame(c, points, tree, su, sv):
-    Q = points[tree.query_ball_point(c, min(su, sv))]
-    n = np.linalg.eigh(np.cov(Q.T))[1][:, 0]
-    n = n if n[2] >= 0 else -n
-    u = np.array([1.0, 0, 0]) - n[0] * n
-    u /= np.linalg.norm(u)
-    return np.column_stack([u, np.cross(n, u), n]), np.percentile(np.abs((Q - c) @ n), 95)
-
-
-def trace_capture(points, tree, centers, A, B, samples, radius):
-    """Summed counted length per rule over the given windows.
-
-    chord = current rule (straight chord tested against the window);
-    foot  = trace evaluated on the surface (sample counted if its foot is in
-    the window). Sphere of radius R and square 2R x 2R. P21 only; mu untested.
-    """
-    total = dict(sphere_chord=0.0, sphere_foot=0.0, rect_chord=0.0, rect_foot=0.0)
-    side = 2 * radius
-    for c in centers:
-        total["sphere_chord"] += _sphere_chord(c, A, B, radius)
-        total["sphere_foot"] += samples["w"][samples["ftree"].query_ball_point(c, radius)].sum()
-        frame, delta = _rect_frame(c, points, tree, side, side)
-        half = np.array([side / 2, side / 2, delta])
-        total["rect_chord"] += _clip_len((A - c) @ frame, (B - A) @ frame, -half, half).sum()
-        index = np.asarray(samples["ftree"].query_ball_point(c, side), int)
-        if index.size:
-            uv = (points[samples["foot"][index]] - c) @ frame[:, :2]
-            inside = (np.abs(uv[:, 0]) <= side / 2) & (np.abs(uv[:, 1]) <= side / 2)
-            total["rect_foot"] += samples["w"][index][inside].sum()
-    return total
+    Returns a DataFrame with eta_sphere and eta_rect (one row per centre)."""
+    out = np.full((len(centers), 2), np.nan)
+    for i, index in enumerate(samples["ftree"].query_ball_point(centers, radius)):
+        if len(index):
+            s, w = samples["s"][index], samples["w"][index]
+            out[i, 0] = np.average(np.clip(1 - (s ** 2 + xi[i] ** 2) / radius ** 2, 0, None), weights=w)
+            out[i, 1] = np.average(np.abs(s) <= delta[i], weights=w)
+    return pd.DataFrame(out, columns=["eta_sphere", "eta_rect"])
 
 
 # --------------------------------------------------------- high level ---
@@ -166,9 +158,11 @@ def trace_capture(points, tree, centers, A, B, samples, radius):
 class RoughnessResult:
     """Roughness of sampling windows.
 
-    table      : X, Y, Z, xi, rho, delta, cover, admissible (at `radius`), R_adm
-    by_radius  : per radius -> median rho and admissible fraction (+ capture ratios)
-    scaling    : radius -> xi quantiles (25, 50, 75 %) for the scaling law
+    table      : X, Y, Z, xi, iota, delta, cover, admissible (at `radius`), R_adm, reason
+    by_radius  : per radius R -> median iota, admissible fraction of the sphere (iota at R)
+                 and of the rectangle with side 2R (iota at 2R), and, with retention=True,
+                 mean predicted retention eta_sphere and eta_rect
+    scaling    : radius -> xi quantiles (25, 50, 75 %); the power law is fitted on fit_range
     """
     table: pd.DataFrame
     radius: float
@@ -180,6 +174,7 @@ class RoughnessResult:
     scaling: pd.DataFrame
     A: float
     H: float
+    fit_range: tuple = None
     filtered: bool = False
     length_unit: str = "m"
     scan: dict = field(default_factory=dict, repr=False)
@@ -196,7 +191,7 @@ class RoughnessResult:
         return pd.Series({"windows": len(self.table), "radius": self.radius, "tau": self.tau,
                           "min_cover": self.min_cover, "admissible_fraction": float(self.admissible.mean())
                           if len(self.table) else np.nan,
-                          "median_rho": float(self.table.rho.median()) if len(self.table) else np.nan,
+                          "median_iota": float(self.table.iota.median()) if len(self.table) else np.nan,
                           "A": self.A, "H": self.H, "R_min": self.r_min, "filter_applied": self.filtered})
 
     def plot(self, **kwargs):
@@ -204,72 +199,94 @@ class RoughnessResult:
 
 
 def window_radius(window):
-    """Roughness radius of a sampling window: R for spheres, equal-area radius for rectangles."""
+    """Roughness radius of a sampling window: R for spheres, min(size_u, size_v) for
+    rectangles (the neighbourhood RectangleAnalyzer uses to fit the window plane)."""
     if window.kind == "sphere":
         return float(window.radius)
-    return float(np.sqrt(window.size_u * window.size_v / np.pi))
+    return float(min(window.size_u, window.size_v))
 
 
 def _assess(scan_xyz, centers, radius, *, radii=None, tau=DEFAULT_TAU, min_cover=DEFAULT_MIN_COVER,
-            scaling=True, length_unit="m", traces=None, capture=False):
+            scaling=True, length_unit="m", traces=None, retention=False, fit_range=None,
+            slab_mode=DEFAULT_SLAB_MODE, rectangle_radii=True):
     centers = np.asarray(centers, float).reshape(-1, 3)
     radius = float(radius)
     radii = sorted({float(r) for r in (radii if radii is not None else [radius])} | {radius})
     if min(radii) <= 0 or not 0 < tau or not 0 <= min_cover <= 1:
         raise ValueError("radii and tau must be positive; min_cover within [0, 1].")
+    if slab_mode not in ("p95", "p99", "max"):
+        raise ValueError("slab_mode must be 'p95', 'p99' or 'max'.")
     origin = scan_xyz.mean(0)
     working = min(radii) / 10                      # R >= 10 x spacing
     points = voxel_thin(scan_xyz - origin, working)
     tree = cKDTree(points)
     spacing = max(working, float(np.median(tree.query(points[::20], k=2)[0][:, 1])))
     local = centers - origin
-    scan_radii = list(radii)
+    scan_radii = set(radii)
+    if rectangle_radii or retention:               # rectangle of side W = 2R reads iota and delta at 2R
+        scan_radii |= {2 * R for R in radii}
     if scaling:
         extra = np.round(np.geomspace(0.5 * min(radii), 2 * max(radii), 6), 3)
-        scan_radii = sorted(set(radii) | set(float(r) for r in extra))
-    scan = roughness_scan(points, local, scan_radii, spacing) if len(local) else {
-        R: pd.DataFrame(columns=["xi", "rho", "delta", "cover"], dtype=float) for R in scan_radii}
+        scan_radii |= set(float(r) for r in extra)
+    scan_radii = sorted(scan_radii)
+    columns = ["xi", "iota", "delta", "cover"]
+    scan = roughness_scan(points, local, scan_radii, spacing, slab_mode=slab_mode) if len(local) else {
+        R: pd.DataFrame(columns=columns, dtype=float) for R in scan_radii}
     main = scan[radius]
-    r_adm, ok = admissible_radius({R: scan[R] for R in radii}, tau, min_cover)
+    if len(local):
+        r_adm, ok, reason = admissible_radius({R: scan[R] for R in radii}, tau, min_cover)
+    else:
+        r_adm, ok, reason = np.empty(0), np.empty((0, len(radii)), bool), np.empty(0, object)
     column = radii.index(radius)
     table = pd.DataFrame(centers, columns=["X", "Y", "Z"]).assign(
-        xi=main.xi.to_numpy(), rho=main.rho.to_numpy(), delta=main.delta.to_numpy(),
-        cover=main.cover.to_numpy(), admissible=ok[:, column] if len(local) else np.empty(0, bool),
-        R_adm=r_adm)
+        xi=main.xi.to_numpy(), iota=main.iota.to_numpy(), delta=main.delta.to_numpy(),
+        cover=main.cover.to_numpy(), admissible=ok[:, column], R_adm=r_adm, reason=reason)
     quantiles = np.array([scan[R].xi.quantile([0.25, 0.5, 0.75]).to_numpy() if len(local) else [np.nan] * 3
                           for R in scan_radii], dtype=float)
     scaling_table = pd.DataFrame(quantiles, columns=["xi_q25", "xi_median", "xi_q75"]).assign(radius=scan_radii)
-    A, H = power_law(scan_radii, quantiles[:, 1]) if len(scan_radii) > 1 else (np.nan, np.nan)
-    rows = []
+    if fit_range is None:
+        fit_range = (min(radii), max(radii))
+    fit_range = (float(fit_range[0]), float(fit_range[1]))
+    A, H = power_law(scan_radii, quantiles[:, 1], fit_range) if len(scan_radii) > 1 else (np.nan, np.nan)
+    if not np.isfinite(A) and len(scan_radii) > 1:   # fewer than two radii inside fit_range
+        A, H = power_law(scan_radii, quantiles[:, 1])
     samples = None
-    if capture and traces is not None and len(local):
+    if retention and traces is not None and len(local):
         TA, TB = traces[0] - origin, traces[1] - origin
-        samples = trace_samples(TA, TB, points, tree, fine_normals(points)[1], spacing / 2)
+        samples = trace_samples(TA, TB, points, tree, fine_normals(points)[1], min(radii) / 20)
+    rows = []
     for j, R in enumerate(radii):
-        row = dict(radius=R, rho_median=float(scan[R].rho.median()) if len(local) else np.nan,
+        row = dict(radius=R, iota_median=float(scan[R].iota.median()) if len(local) else np.nan,
                    admissible=float(ok[:, j].mean()) if len(local) else np.nan)
+        if (rectangle_radii or retention) and len(local):
+            wide = scan[2 * R]
+            row["admissible_rect"] = float(((wide.iota <= tau) & (wide.cover >= min_cover)).mean())
         if samples is not None:
-            sums = trace_capture(points, tree, local[ok[:, j]], TA, TB, samples, R)
-            row.update(sphere_ratio=sums["sphere_chord"] / sums["sphere_foot"] if sums["sphere_foot"] else np.nan,
-                       rect_ratio=sums["rect_chord"] / sums["rect_foot"] if sums["rect_foot"] else np.nan)
+            eta = predicted_retention(local, samples, R, scan[R].xi.to_numpy(), scan[2 * R].delta.to_numpy())
+            row.update(eta_sphere=float(eta.eta_sphere.mean()), eta_rect=float(eta.eta_rect.mean()))
         rows.append(row)
     return RoughnessResult(table, radius, tuple(radii), float(tau), float(min_cover), spacing,
-                           pd.DataFrame(rows), scaling_table, A, H, length_unit=length_unit, scan=scan)
+                           pd.DataFrame(rows), scaling_table, A, H, fit_range=fit_range,
+                           length_unit=length_unit, scan=scan)
 
 
 def assess_roughness(dataset, result=None, *, centers=None, radius=None, radii=None,
                      tau=DEFAULT_TAU, min_cover=DEFAULT_MIN_COVER, scaling=True, annotate=True,
-                     trace_capture=False):
+                     retention=False, fit_range=None, slab_mode=DEFAULT_SLAB_MODE):
     """Roughness of the sampling windows of `result` (flag only; nothing is rejected).
 
     Defaults follow the analysis: the accepted window centres and the window
-    radius (equal-area radius for rectangles). Pass `centers`/`radius` to
+    radius (min(size_u, size_v) for rectangles). Pass `centers`/`radius` to
     assess other locations or scales, and `radii` to also test other radii
-    (smallest admissible radius R_adm, admissible fraction per radius).
-    With annotate=True the columns xi, rho, cover and admissible are added to
-    every family table of `result`. trace_capture=True also compares the P21
-    numerator of the current (chord) and surface (foot) rules per radius; it
-    is slow and meant for runs where rejection has been decided.
+    (smallest admissible size R_adm = sphere radius = rectangle side, and the
+    admissible fractions per radius for the sphere R and the rectangle W = 2R).
+    The table column `reason` tells why a centre has no admissible radius.
+    fit_range = (lo, hi) limits the power-law fit to the roughness regime
+    (default: the range of `radii`); the other scanned radii are only shown.
+    With annotate=True the columns xi, iota, cover and admissible are added to
+    every family table of `result`. retention=True also computes the predicted
+    retention eta of trace length per radius (needs the traces; slower).
+    slab_mode must match the rectangle delta_mode (default 'max').
     """
     scan_xyz = dataset.scan[["X", "Y", "Z"]].to_numpy(float)
     if centers is None:
@@ -280,11 +297,10 @@ def assess_roughness(dataset, result=None, *, centers=None, radius=None, radii=N
         if result is None:
             raise ValueError("Provide radius when no analysis result is given.")
         radius = window_radius(result.window)
-    traces = None
-    if trace_capture:
-        traces = _trace_endpoints(dataset)
+    traces = _trace_endpoints(dataset) if retention else None
     out = _assess(scan_xyz, centers, radius, radii=radii, tau=tau, min_cover=min_cover, scaling=scaling,
-                  length_unit=dataset.length_unit, traces=traces, capture=trace_capture)
+                  length_unit=dataset.length_unit, traces=traces, retention=retention,
+                  fit_range=fit_range, slab_mode=slab_mode)
     if annotate and result is not None and len(out.table) == len(result.centers):
         _annotate(result, out)
         result.roughness = out
@@ -294,7 +310,7 @@ def assess_roughness(dataset, result=None, *, centers=None, radius=None, radii=N
 def _annotate(result, roughness):
     for frame in result.tables.values():
         if len(frame) == len(roughness.table):
-            for column in ("xi", "rho", "cover", "admissible"):
+            for column in ("xi", "iota", "cover", "admissible"):
                 frame[column] = roughness.table[column].to_numpy()
 
 
@@ -306,17 +322,18 @@ def filter_centers(scan_xyz, centers, window, options=None, length_unit="m"):
         raise ValueError(f"Unknown roughness options: {sorted(set(options) - allowed)}.")
     radius = options.pop("radius", None) or window_radius(window)
     options.setdefault("scaling", False)
-    out = _assess(scan_xyz, centers, radius, length_unit=length_unit, **options)
+    out = _assess(scan_xyz, centers, radius, length_unit=length_unit, rectangle_radii=False, **options)
     out.filtered = True
     return np.asarray(centers, float).reshape(-1, 3)[out.admissible], out
 
 
 # -------------------------------------------------------------- figure ---
 def plot_roughness(roughness, *, dfn=None, families=None, case_id=0):
-    """Roughness figure: (a) map, [(b) total P32 if `dfn`], (c) scaling law, (d) admissibility.
+    """Roughness figure: (a) map, [(b) total P32 if `dfn`], (c) scaling law, (d) diagnostics.
 
-    Panel (d) shows the P21 chord/foot ratios only when they were computed
-    (assess_roughness(..., trace_capture=True)). Returns (figure, axes dict).
+    Panel (d) shows the admissible fractions of the sphere (R) and of the rectangle
+    (W = 2R) and, when computed (assess_roughness(..., retention=True)), the
+    predicted retention eta. Returns (figure, axes dict).
     """
     import matplotlib.pyplot as plt
     from .style import style_context, SEQUENTIAL, SEQUENTIAL_POINTS, ACCENT, MUTED, FAMILY_COLORS, ordinal_colors
@@ -347,14 +364,18 @@ def plot_roughness(roughness, *, dfn=None, families=None, case_id=0):
                 m = np.isclose(table.R_adm, R)
                 ax.scatter(*uv[m].T, s=8, color=color, linewidths=0, label=fr"$R_{{adm}}$ = {R:g} {unit}")
             none = table.R_adm.isna().to_numpy()
-            title = fr"Smallest admissible radius ($\rho\leq{roughness.tau:g}$)"
+            title = fr"Smallest admissible size ($\iota\leq{roughness.tau:g}$): sphere radius $R$ = rectangle side $W$"
         else:
             ok = roughness.admissible
             ax.scatter(*uv[ok].T, s=8, color=SEQUENTIAL(0.7), linewidths=0, label="Admissible")
             none = ~ok
-            title = fr"Admissible windows at $R$ = {roughness.radius:g} {unit} ($\rho\leq{roughness.tau:g}$)"
-        ax.scatter(*uv[none].T, s=14, marker="x", color=ACCENT, lw=0.8,
-                   label="None" if len(radii) > 1 else "Not admissible")
+            title = fr"Admissible windows at $R$ = {roughness.radius:g} {unit} ($\iota\leq{roughness.tau:g}$)"
+        rough = none & (table.reason.to_numpy() == "rough") if len(radii) > 1 else none
+        ax.scatter(*uv[rough].T, s=14, marker="x", color=ACCENT, lw=0.8,
+                   label=r"None: $\iota > \tau$" if len(radii) > 1 else "Not admissible")
+        if len(radii) > 1 and (none & ~rough).any():
+            ax.scatter(*uv[none & ~rough].T, s=8, color=MUTED, alpha=0.4, linewidths=0,
+                       label="None: low cover or few points")
         ax.set(aspect="equal", xlabel=f"Along slope ({unit})", ylabel=f"Across slope ({unit})",
                title=f"(a) {title}")
         ax.legend(loc="center left", bbox_to_anchor=(1.01, 0.5), markerscale=2)
@@ -378,6 +399,8 @@ def plot_roughness(roughness, *, dfn=None, families=None, case_id=0):
             if np.isfinite(roughness.A):
                 ax.plot(r, roughness.A * r ** roughness.H, color=FAMILY_COLORS[0],
                         label=fr"$\xi={roughness.A:.3f}\,r^{{{roughness.H:.2f}}}$")
+                if roughness.fit_range is not None:
+                    ax.axvspan(*roughness.fit_range, color=MUTED, alpha=0.08, lw=0, label="Fit range")
             ax.plot(r, roughness.tau * r, "--", color=MUTED, lw=1.3, label=fr"$\xi={roughness.tau:g}\,r$")
             ax.set(xscale="log", yscale="log")
             ticks = [v for v in roughness.radii] + [r.min(), r.max()]
@@ -391,18 +414,21 @@ def plot_roughness(roughness, *, dfn=None, families=None, case_id=0):
                title=f"({next(letters)}) Roughness scaling")
         ax = axes["admissibility"]
         b = roughness.by_radius
-        ax.plot(b.radius, b.admissible, "-o", color=MUTED, ms=5, label="Admissible windows")
-        if "sphere_ratio" in b:
-            ax.plot(b.radius, b.sphere_ratio, "-o", color=FAMILY_COLORS[0], ms=5,
-                    label=r"$P_{21}$ current / surface rule, sphere")
-            ax.plot(b.radius, b.rect_ratio, "-s", color=FAMILY_COLORS[1], ms=5,
-                    label=r"$P_{21}$ current / surface rule, rectangle")
+        ax.plot(b.radius, b.admissible, "-o", color=FAMILY_COLORS[0], ms=5, label=r"Admissible ($\iota$), sphere")
+        if "admissible_rect" in b:
+            ax.plot(b.radius, b.admissible_rect, "-s", color=FAMILY_COLORS[1], ms=5,
+                    label=r"Admissible ($\iota$), rectangle")
+        if "eta_sphere" in b:
+            ax.plot(b.radius, b.eta_sphere, "--o", color=FAMILY_COLORS[0], mfc="white", ms=5,
+                    label=r"Retention $\eta$, sphere")
+            ax.plot(b.radius, b.eta_rect, "--s", color=FAMILY_COLORS[1], mfc="white", ms=5,
+                    label=r"Retention $\eta$, rectangle")
         if len(b) > 1:
             ax.set_xscale("log")
         ax.set_xticks(b.radius, [f"{v:g}" for v in b.radius])
         ax.minorticks_off()
         ax.set(ylim=(0, 1.05), xlabel=f"Window radius $R$ ({unit})", ylabel="Fraction",
-               title=f"({next(letters)}) Admissibility" + (" and trace capture" if "sphere_ratio" in b else ""))
+               title=f"({next(letters)}) Diagnostics vs window size")
         ax.legend(loc="lower right")
         for ax in (axes["scaling"], axes["admissibility"]):
             ax.set_box_aspect(1)

@@ -27,6 +27,7 @@ src/tm_scan/statistics.py
 src/tm_scan/stereonet.py
 src/tm_scan/studies.py
 src/tm_scan/style.py
+src/tm_scan/undefined.py
 src/tm_scan.egg-info/PKG-INFO
 src/tm_scan.egg-info/SOURCES.txt
 src/tm_scan.egg-info/dependency_links.txt

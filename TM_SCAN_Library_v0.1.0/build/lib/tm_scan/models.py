@@ -178,6 +178,7 @@ class AnalysisResult:
     diagnostics: dict
     quads: list = field(default_factory=list)
     roughness: object = None      # RoughnessResult, set by assess_roughness / roughness_filter
+    undefined: object = None      # DataFrame: one row per NaN estimate and its cause (tm_scan.undefined)
 
     def table(self):
         """Stack families without changing original per-window column names."""
@@ -208,6 +209,11 @@ class AnalysisResult:
             row["n_zero_trace_windows"] = int((frame["N_traces"] == 0).sum()) if len(frame) else 0
             rows.append(row)
         return pd.DataFrame(rows)
+
+    def undefined_summary(self):
+        """Counts of undefined (NaN) estimates per family, quantity and cause."""
+        from .undefined import summarize
+        return summarize(self.undefined)
 
     def export(self, directory):
         from .io import export_result

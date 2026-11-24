@@ -23,8 +23,9 @@ from .plotting import (plot_dfn, plot_dataset, plot_trace_lengths, plot_p32_map,
                        plot_study, plot_sampling, plot_windows, plot_histograms, plot_metric_map,
                        save_figure)
 from .statistics import trace_length_summary
+from .undefined import undefined_log, CAUSES as UNDEFINED_CAUSES
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 __all__ = ["Window", "Sampling", "Dataset", "AnalysisResult", "StudyResult",
            "load_dataset", "list_point_clouds", "analyze", "generate_centers",
            "radius_study", "scale_study", "k_study",
@@ -40,4 +41,4 @@ __all__ = ["Window", "Sampling", "Dataset", "AnalysisResult", "StudyResult",
            "describe_cloud", "plot_cloud", "grid_node_counts", "CloudDescription",
            "plot_dfn", "plot_dataset", "plot_trace_lengths", "plot_p32_map", "plot_p32_uncertainty",
            "plot_study", "plot_sampling", "plot_windows", "plot_histograms", "plot_metric_map",
-           "save_figure", "trace_length_summary"]
+           "save_figure", "trace_length_summary", "undefined_log", "UNDEFINED_CAUSES"]
