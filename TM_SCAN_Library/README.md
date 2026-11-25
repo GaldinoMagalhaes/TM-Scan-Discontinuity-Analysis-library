@@ -7,8 +7,16 @@ spatial dependence and plotting.
 
 ## Installation
 
+From this folder (always installs the current version):
+
 ```
-pip install tm_scan-0.1.1-py3-none-any.whl
+pip install .
+```
+
+or from one of the wheels in `dist/`, which keeps every released version:
+
+```
+pip install dist/tm_scan-0.1.1-py3-none-any.whl
 ```
 
 Requires Python >= 3.9 with numpy, pandas, scipy, scikit-learn, shapely,

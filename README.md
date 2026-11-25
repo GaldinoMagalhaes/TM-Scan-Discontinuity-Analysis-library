@@ -5,15 +5,22 @@ TM-Scan is an open-source Python library for estimating discontinuity intensity 
 
 The repository includes a complete case study (`case_study.ipynb`) that can be used as a template for new analyses.
 
+# How does it work?
+The workflow has three stages: (a) pre-processing of the point cloud, (b) window-level estimation of P20, P21 and μ at each grid point, and (c) DFN modelling and uncertainty analysis.
+
+![TM-Scan workflow](docs/fig_flowchart.png)
+
 # Where do I run it?
 In any Jupyter environment (Jupyter Lab/Notebook, or VS Code with the Jupyter extension), with Python 3.9 or later.
 
 # How do I install it?
-The first cell of `case_study.ipynb` installs the library and all its dependencies from the wheel included in the repository. After running it, restart the kernel. To install manually, run in the repository folder:
+The first cell of `case_study.ipynb` installs the library and all its dependencies from the `TM_SCAN_Library` folder, so it always installs the current version. After running it, restart the kernel. To install manually, run in the repository folder:
 
 ```text
-pip install ./TM_SCAN_Library_v0.1.0/dist/tm_scan-0.1.1-py3-none-any.whl
+pip install ./TM_SCAN_Library
 ```
+
+Every released version is also kept as a wheel in `TM_SCAN_Library/dist/` (e.g. `pip install ./TM_SCAN_Library/dist/tm_scan-0.1.1-py3-none-any.whl`).
 
 The following libraries are installed automatically: NumPy, Pandas, SciPy, Scikit-learn, Shapely, GeoPandas, Matplotlib, Joblib and Numba.
 
@@ -22,17 +29,17 @@ The notebook uses paths relative to its own folder, so keep the structure below:
 
 ```text
 Main_folder/
-├── TM_SCAN_Library_v0.1.0/          library source code and installable wheel (dist/)
+├── TM_SCAN_Library/                 library source code and installable wheels (dist/)
 ├── case_studies/
-│   ├── slope_01/
-│   │   ├── case_study.ipynb         complete workflow
-│   │   └── database/
-│   │       ├── mapped_planes/
-│   │       ├── slope_boundary/
-│   │       ├── surface_scan/
-│   │       └── traces/
-│   └── slope_02/                    same structure as slope_01
-└── tests_and_validation/            tests and validation of the library
+│   └── slope_01/
+│       ├── case_study.ipynb         complete workflow
+│       └── database/
+│           ├── mapped_planes/
+│           ├── slope_boundary/
+│           ├── surface_scan/
+│           └── traces/
+├── docs/                            figures used in this README
+└── tests_and_validation/            tests and validation of the library (PDF reports)
 ```
 
 # How do I prepare a database?
